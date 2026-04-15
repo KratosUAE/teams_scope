@@ -1,0 +1,501 @@
+package crawler
+
+import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"sync"
+	"testing"
+	"time"
+
+	"teams_con/internal/graph"
+	"teams_con/internal/store"
+)
+
+// fakeGraph implements graphClient for unit tests. listFn and getFn may be
+// overridden per-test; the default implementations return empty slices and
+// nil so tests only have to set the behaviour they care about.
+type fakeGraph struct {
+	listFn func(ctx context.Context, start, end time.Time) ([]graph.CallRecordRef, error)
+	getFn  func(ctx context.Context, id string) (*graph.CallRecord, error)
+
+	mu       sync.Mutex
+	listCall int
+	getIDs   []string
+}
+
+func (f *fakeGraph) ListCallRecordsInRange(ctx context.Context, start, end time.Time) ([]graph.CallRecordRef, error) {
+	f.mu.Lock()
+	f.listCall++
+	f.mu.Unlock()
+	if f.listFn != nil {
+		return f.listFn(ctx, start, end)
+	}
+	return nil, nil
+}
+
+func (f *fakeGraph) GetCallRecord(ctx context.Context, id string) (*graph.CallRecord, error) {
+	f.mu.Lock()
+	f.getIDs = append(f.getIDs, id)
+	f.mu.Unlock()
+	if f.getFn != nil {
+		return f.getFn(ctx, id)
+	}
+	return &graph.CallRecord{ID: id}, nil
+}
+
+// fakeCalls is a tiny in-memory callsRepo.
+type fakeCalls struct {
+	mu       sync.Mutex
+	docs     map[string]store.Call
+	existErr error
+}
+
+func newFakeCalls() *fakeCalls { return &fakeCalls{docs: make(map[string]store.Call)} }
+
+func (f *fakeCalls) Exists(_ context.Context, id string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.existErr != nil {
+		return false, f.existErr
+	}
+	_, ok := f.docs[id]
+	return ok, nil
+}
+
+func (f *fakeCalls) Upsert(_ context.Context, c store.Call) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.docs[c.CallId] = c
+	return nil
+}
+
+// fakeStreams is a tiny in-memory streamsRepo.
+type fakeStreams struct {
+	mu          sync.Mutex
+	byCall      map[string][]store.StreamRow
+	replaceN    int // counts ReplaceByCall invocations
+}
+
+func newFakeStreams() *fakeStreams { return &fakeStreams{byCall: make(map[string][]store.StreamRow)} }
+
+func (f *fakeStreams) HasStreams(_ context.Context, callID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rows, ok := f.byCall[callID]
+	return ok && len(rows) > 0, nil
+}
+
+func (f *fakeStreams) ReplaceByCall(_ context.Context, callID string, rows []store.StreamRow) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.byCall[callID] = rows
+	f.replaceN++
+	return nil
+}
+
+// fakeMeta is a tiny in-memory metaRepo.
+type fakeMeta struct {
+	mu              sync.Mutex
+	lastCrawlAt     time.Time
+	lastCrawlErr    error
+	lastBackfillAt  time.Time
+	setLastCrawlN   int
+	setLastBackfill int
+}
+
+func (f *fakeMeta) SetLastCrawl(_ context.Context, at time.Time, crawlErr error) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastCrawlAt = at
+	f.lastCrawlErr = crawlErr
+	f.setLastCrawlN++
+	return nil
+}
+
+func (f *fakeMeta) SetLastBackfill(_ context.Context, at time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastBackfillAt = at
+	f.setLastBackfill++
+	return nil
+}
+
+// discardLog returns a slog.Logger that drops every record so test output
+// stays clean.
+func discardLog() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func newTestCrawler(gc graphClient, calls callsRepo, streams streamsRepo, meta metaRepo) *Crawler {
+	return newWithDeps(Config{}, gc, calls, streams, meta, discardLog())
+}
+
+func TestClampDays(t *testing.T) {
+	tests := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{"zero clamps to min", 0, minBackfillDays},
+		{"negative clamps to min", -7, minBackfillDays},
+		{"one stays one", 1, 1},
+		{"mid range passes through", 15, 15},
+		{"thirty stays thirty", 30, 30},
+		{"above max clamps to max", 99, maxBackfillDays},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := clampDays(tt.in); got != tt.want {
+				t.Errorf("clampDays(%d) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewAppliesDefaults(t *testing.T) {
+	c := newWithDeps(Config{}, &fakeGraph{}, newFakeCalls(), newFakeStreams(), &fakeMeta{}, nil)
+	if c.cfg.Interval != defaultInterval {
+		t.Errorf("Interval default: got %v, want %v", c.cfg.Interval, defaultInterval)
+	}
+	if c.cfg.Window != defaultWindow {
+		t.Errorf("Window default: got %v, want %v", c.cfg.Window, defaultWindow)
+	}
+	if c.log == nil {
+		t.Error("log should not be nil after New")
+	}
+}
+
+func TestNewPreservesExplicitConfig(t *testing.T) {
+	cfg := Config{Interval: 42 * time.Second, Window: 13 * time.Minute, IncludeVideo: true}
+	c := newWithDeps(cfg, &fakeGraph{}, newFakeCalls(), newFakeStreams(), &fakeMeta{}, discardLog())
+	if c.cfg.Interval != 42*time.Second {
+		t.Errorf("Interval: got %v, want 42s", c.cfg.Interval)
+	}
+	if c.cfg.Window != 13*time.Minute {
+		t.Errorf("Window: got %v, want 13m", c.cfg.Window)
+	}
+	if !c.cfg.IncludeVideo {
+		t.Error("IncludeVideo should be true")
+	}
+}
+
+func TestTickSkipsExistingCalls(t *testing.T) {
+	existing := "call-already-stored"
+	gc := &fakeGraph{
+		listFn: func(_ context.Context, _, _ time.Time) ([]graph.CallRecordRef, error) {
+			return []graph.CallRecordRef{{ID: existing}}, nil
+		},
+	}
+	calls := newFakeCalls()
+	calls.docs[existing] = store.Call{CallId: existing}
+	streams := newFakeStreams()
+	// Pre-seed a stream row so HasStreams returns true and the skip path is
+	// exercised (fully-written record — both call and streams are present).
+	streams.byCall[existing] = []store.StreamRow{{CallId: existing}}
+	meta := &fakeMeta{}
+
+	c := newTestCrawler(gc, calls, streams, meta)
+	if err := c.tick(context.Background(), time.Now().Add(-time.Hour), time.Now()); err != nil {
+		t.Fatalf("tick returned error: %v", err)
+	}
+
+	if len(gc.getIDs) != 0 {
+		t.Errorf("GetCallRecord should not be called for existing id, got %v", gc.getIDs)
+	}
+	streams.mu.Lock()
+	n := streams.replaceN
+	streams.mu.Unlock()
+	if n != 0 {
+		t.Errorf("streams.ReplaceByCall should not be called for fully-written id, got %d call(s)", n)
+	}
+	if meta.setLastCrawlN != 1 {
+		t.Errorf("SetLastCrawl calls: got %d, want 1", meta.setLastCrawlN)
+	}
+	if meta.lastCrawlErr != nil {
+		t.Errorf("lastCrawlErr: got %v, want nil", meta.lastCrawlErr)
+	}
+}
+
+func TestTickUpsertsNewCalls(t *testing.T) {
+	start := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	end := start.Add(30 * time.Minute)
+	gc := &fakeGraph{
+		listFn: func(_ context.Context, _, _ time.Time) ([]graph.CallRecordRef, error) {
+			return []graph.CallRecordRef{{ID: "new-1"}, {ID: "new-2"}}, nil
+		},
+		getFn: func(_ context.Context, id string) (*graph.CallRecord, error) {
+			return &graph.CallRecord{
+				ID:            id,
+				StartDateTime: start,
+				EndDateTime:   end,
+			}, nil
+		},
+	}
+	calls := newFakeCalls()
+	streams := newFakeStreams()
+	meta := &fakeMeta{}
+
+	c := newTestCrawler(gc, calls, streams, meta)
+	if err := c.tick(context.Background(), start, end); err != nil {
+		t.Fatalf("tick returned error: %v", err)
+	}
+
+	if len(calls.docs) != 2 {
+		t.Errorf("expected 2 upserted calls, got %d", len(calls.docs))
+	}
+	if _, ok := calls.docs["new-1"]; !ok {
+		t.Error("new-1 should be upserted")
+	}
+	if _, ok := streams.byCall["new-1"]; !ok {
+		t.Error("streams for new-1 should be replaced")
+	}
+	if meta.lastCrawlErr != nil {
+		t.Errorf("lastCrawlErr: got %v, want nil", meta.lastCrawlErr)
+	}
+}
+
+func TestTickToleratesNotFound(t *testing.T) {
+	gc := &fakeGraph{
+		listFn: func(_ context.Context, _, _ time.Time) ([]graph.CallRecordRef, error) {
+			return []graph.CallRecordRef{{ID: "missing"}, {ID: "ok"}}, nil
+		},
+		getFn: func(_ context.Context, id string) (*graph.CallRecord, error) {
+			if id == "missing" {
+				return nil, graph.ErrCallNotFound
+			}
+			return &graph.CallRecord{ID: id}, nil
+		},
+	}
+	calls := newFakeCalls()
+	streams := newFakeStreams()
+	meta := &fakeMeta{}
+
+	c := newTestCrawler(gc, calls, streams, meta)
+	if err := c.tick(context.Background(), time.Now().Add(-time.Hour), time.Now()); err != nil {
+		t.Fatalf("tick returned error: %v", err)
+	}
+
+	if _, ok := calls.docs["missing"]; ok {
+		t.Error("missing call should not be persisted")
+	}
+	if _, ok := calls.docs["ok"]; !ok {
+		t.Error("ok call should be persisted alongside the missing one")
+	}
+	// lastCrawlErr should be nil — ErrCallNotFound is an expected race,
+	// not a tick-level failure.
+	if meta.lastCrawlErr != nil {
+		t.Errorf("lastCrawlErr: got %v, want nil", meta.lastCrawlErr)
+	}
+}
+
+func TestTickRecordsLastErrorOnListFailure(t *testing.T) {
+	boom := errors.New("graph boom")
+	gc := &fakeGraph{
+		listFn: func(_ context.Context, _, _ time.Time) ([]graph.CallRecordRef, error) {
+			return nil, boom
+		},
+	}
+	calls := newFakeCalls()
+	streams := newFakeStreams()
+	meta := &fakeMeta{}
+
+	c := newTestCrawler(gc, calls, streams, meta)
+	err := c.tick(context.Background(), time.Now().Add(-time.Hour), time.Now())
+	if err == nil {
+		t.Fatal("tick should return an error on list failure")
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("expected wrapped list error, got %v", err)
+	}
+	if meta.setLastCrawlN != 1 {
+		t.Errorf("SetLastCrawl calls: got %d, want 1", meta.setLastCrawlN)
+	}
+	if meta.lastCrawlErr == nil {
+		t.Error("lastCrawlErr should be set after list failure")
+	}
+}
+
+func TestTickContinuesAfterStoreError(t *testing.T) {
+	gc := &fakeGraph{
+		listFn: func(_ context.Context, _, _ time.Time) ([]graph.CallRecordRef, error) {
+			return []graph.CallRecordRef{{ID: "a"}, {ID: "b"}}, nil
+		},
+	}
+	calls := &fakeCalls{docs: make(map[string]store.Call), existErr: errors.New("mongo down")}
+	streams := newFakeStreams()
+	meta := &fakeMeta{}
+
+	c := newTestCrawler(gc, calls, streams, meta)
+	// Even though every Exists call fails, the tick must complete and
+	// still set lastCrawl to nil — individual record errors are logged,
+	// not escalated.
+	if err := c.tick(context.Background(), time.Now().Add(-time.Hour), time.Now()); err != nil {
+		t.Fatalf("tick should tolerate per-record errors, got %v", err)
+	}
+	if meta.lastCrawlErr != nil {
+		t.Errorf("lastCrawlErr: got %v, want nil (per-record errors shouldn't bubble)", meta.lastCrawlErr)
+	}
+}
+
+func TestBackfillStampsMeta(t *testing.T) {
+	gc := &fakeGraph{
+		listFn: func(_ context.Context, _, _ time.Time) ([]graph.CallRecordRef, error) {
+			return nil, nil
+		},
+	}
+	meta := &fakeMeta{}
+	c := newTestCrawler(gc, newFakeCalls(), newFakeStreams(), meta)
+
+	if err := c.Backfill(context.Background(), 7); err != nil {
+		t.Fatalf("Backfill: %v", err)
+	}
+	if meta.setLastBackfill != 1 {
+		t.Errorf("SetLastBackfill calls: got %d, want 1", meta.setLastBackfill)
+	}
+	if meta.lastBackfillAt.IsZero() {
+		t.Error("lastBackfillAt should be stamped")
+	}
+}
+
+func TestBackfillClampsDays(t *testing.T) {
+	var seenStart, seenEnd time.Time
+	gc := &fakeGraph{
+		listFn: func(_ context.Context, start, end time.Time) ([]graph.CallRecordRef, error) {
+			seenStart = start
+			seenEnd = end
+			return nil, nil
+		},
+	}
+	c := newTestCrawler(gc, newFakeCalls(), newFakeStreams(), &fakeMeta{})
+
+	if err := c.Backfill(context.Background(), 999); err != nil {
+		t.Fatalf("Backfill: %v", err)
+	}
+
+	diff := seenEnd.Sub(seenStart)
+	// Allow a little slop because wallclock advances between the fake's
+	// start capture and the assertion.
+	wantMin := time.Duration(maxBackfillDays)*24*time.Hour - time.Minute
+	wantMax := time.Duration(maxBackfillDays)*24*time.Hour + time.Minute
+	if diff < wantMin || diff > wantMax {
+		t.Errorf("backfill window span: got %v, want ~%v", diff, time.Duration(maxBackfillDays)*24*time.Hour)
+	}
+}
+
+// TestTick_HealsPartialWrite verifies that when a call document is already
+// stored but its streams are missing (partial-write scenario), the crawler
+// falls through and re-runs GetCallRecord + ReplaceByCall to heal the gap.
+func TestTick_HealsPartialWrite(t *testing.T) {
+	partialID := "call-partial"
+	gc := &fakeGraph{
+		listFn: func(_ context.Context, _, _ time.Time) ([]graph.CallRecordRef, error) {
+			return []graph.CallRecordRef{{ID: partialID}}, nil
+		},
+		getFn: func(_ context.Context, id string) (*graph.CallRecord, error) {
+			return &graph.CallRecord{ID: id}, nil
+		},
+	}
+	calls := newFakeCalls()
+	// Call document exists (was written in a previous tick).
+	calls.docs[partialID] = store.Call{CallId: partialID}
+
+	streams := newFakeStreams()
+	// Streams are NOT seeded — simulates the partial-write gap.
+
+	meta := &fakeMeta{}
+
+	c := newTestCrawler(gc, calls, streams, meta)
+	if err := c.tick(context.Background(), time.Now().Add(-time.Hour), time.Now()); err != nil {
+		t.Fatalf("tick returned error: %v", err)
+	}
+
+	// GetCallRecord must have been called to heal the gap.
+	gc.mu.Lock()
+	gotIDs := gc.getIDs
+	gc.mu.Unlock()
+	if len(gotIDs) == 0 || gotIDs[0] != partialID {
+		t.Errorf("GetCallRecord should be called to heal partial write, got %v", gotIDs)
+	}
+
+	// ReplaceByCall must have been invoked — streams entry should now exist.
+	streams.mu.Lock()
+	_, replaced := streams.byCall[partialID]
+	streams.mu.Unlock()
+	if !replaced {
+		t.Error("ReplaceByCall should be invoked to write missing streams")
+	}
+}
+
+// TestTick_SkipsFullyWrittenCall verifies that when both call and streams are
+// present, the crawler skips without calling GetCallRecord.
+func TestTick_SkipsFullyWrittenCall(t *testing.T) {
+	fullID := "call-complete"
+	gc := &fakeGraph{
+		listFn: func(_ context.Context, _, _ time.Time) ([]graph.CallRecordRef, error) {
+			return []graph.CallRecordRef{{ID: fullID}}, nil
+		},
+	}
+	calls := newFakeCalls()
+	calls.docs[fullID] = store.Call{CallId: fullID}
+
+	streams := newFakeStreams()
+	// Both call and streams are present — fully written record.
+	streams.byCall[fullID] = []store.StreamRow{{CallId: fullID}}
+
+	meta := &fakeMeta{}
+
+	c := newTestCrawler(gc, calls, streams, meta)
+	if err := c.tick(context.Background(), time.Now().Add(-time.Hour), time.Now()); err != nil {
+		t.Fatalf("tick returned error: %v", err)
+	}
+
+	gc.mu.Lock()
+	gotIDs := gc.getIDs
+	gc.mu.Unlock()
+	if len(gotIDs) != 0 {
+		t.Errorf("GetCallRecord should NOT be called for fully-written record, got %v", gotIDs)
+	}
+}
+
+func TestRunFirstTickFiresImmediatelyThenCancels(t *testing.T) {
+	ticked := make(chan struct{}, 1)
+	gc := &fakeGraph{
+		listFn: func(_ context.Context, _, _ time.Time) ([]graph.CallRecordRef, error) {
+			select {
+			case ticked <- struct{}{}:
+			default:
+			}
+			return nil, nil
+		},
+	}
+	meta := &fakeMeta{}
+	c := newWithDeps(
+		Config{Interval: time.Hour, Window: time.Minute},
+		gc, newFakeCalls(), newFakeStreams(), meta, discardLog(),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+
+	select {
+	case <-ticked:
+		// Good: the initial tick fired without waiting an hour.
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial tick did not fire")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Run error: got %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+}

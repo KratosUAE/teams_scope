@@ -1,0 +1,46 @@
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      # Publish to localhost only so the MCP subcommand (run as a local
+      # subprocess by Claude Code) can reach the same Mongo the crawler
+      # writes to. For multi-host / shared setups, bind to a specific
+      # interface or drop this mapping and run the MCP server as another
+      # compose service.
+      - "127.0.0.1:27018:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  crawler:
+    build: .
+    command: ["crawl", "--interval=5m", "--window=30m"]
+    env_file: .env
+    environment:
+      MongoUri: mongodb://mongo:27017/teams_con
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    build: .
+    command: ["serve", "--addr=:8080"]
+    env_file: .env
+    environment:
+      MongoUri: mongodb://mongo:27017/teams_con
+    ports:
+      - "8080:8080"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mongo_data:

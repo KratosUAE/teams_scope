@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "teams_con": {
+      "command": "/ABSOLUTE/PATH/TO/teams_con",
+      "args": ["mcp"],
+      "env": {
+        "MongoUri": "mongodb://localhost:27018/teams_con"
+      }
+    }
+  }
+}

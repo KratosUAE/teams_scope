@@ -1,0 +1,44 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Test / coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Go workspace
+go.work
+go.work.sum
+
+# Env / secrets
+.env
+.env.local
+*.env
+
+# Editors / OS / tooling
+.idea/
+.vscode/
+.DS_Store
+*.swp
+.serena/
+.claude/
+.agent/
+.ragcode/
+
+# Local build output
+/teams_con
+
+# Local MCP config — real path to the installed binary. The committed
+# template lives in .mcp.json.example; each developer copies it to
+# .mcp.json and edits `command` to match their install.
+.mcp.json
+
+# Sibling repository (PowerShell) — separate project, kept here only as a
+# read-only ground-truth reference for the quality logic port.
+PowerShell/
