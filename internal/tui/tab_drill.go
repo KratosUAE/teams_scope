@@ -60,6 +60,7 @@ const (
 	drillSortLabel
 	drillSortJitter
 	drillSortLoss
+	drillSortLossMax
 	drillSortRtt
 	drillSortSegment
 )
@@ -276,6 +277,8 @@ func (m *drillModel) handleKey(msg tea.KeyPressMsg) (tabView, tea.Cmd) {
 			m.toggleSort(drillSortJitter, true)
 		case "l":
 			m.toggleSort(drillSortLoss, true)
+		case "x":
+			m.toggleSort(drillSortLossMax, true)
 		case "p":
 			m.toggleSort(drillSortRtt, true)
 		case "m":
@@ -389,6 +392,8 @@ func (m *drillModel) sortStreams() {
 			lt = floatPtrLess(a.AvgJitterMs, b.AvgJitterMs)
 		case drillSortLoss:
 			lt = floatPtrLess(a.AvgLossPct, b.AvgLossPct)
+		case drillSortLossMax:
+			lt = floatPtrLess(a.MaxLossPct, b.MaxLossPct)
 		case drillSortRtt:
 			lt = floatPtrLess(a.AvgRttMs, b.AvgRttMs)
 		case drillSortSegment:
@@ -663,6 +668,7 @@ func (m *drillModel) renderStatsTable() string {
 			r.Verdict,
 			formatJit(r.AvgJitterMs, r.MaxJitterMs),
 			formatLoss(r.AvgLossPct),
+			formatLoss(r.MaxLossPct),
 			formatRtt(r.AvgRttMs),
 			formatConn(r.ConnType),
 			formatPlatform(r.Platform),
@@ -899,6 +905,7 @@ var drillColumns = []column{
 	{title: "Verdict", key: "s", min: 10, weight: 0},
 	{title: "Jit a/m", key: "i", min: 11, weight: 0},
 	{title: "Loss", key: "l", min: 8, weight: 0},
+	{title: "LossMax", key: "x", min: 9, weight: 0},
 	{title: "Rtt", key: "p", min: 8, weight: 0},
 	{title: "Conn", min: 8, weight: 0},
 	{title: "Client", min: 9, weight: 0},

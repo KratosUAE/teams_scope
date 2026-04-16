@@ -16,6 +16,17 @@ const (
 	// considered Bad. PS line 23: PacketLossBad = 0.10 (> 10%).
 	PacketLossBad = 0.10
 
+	// MaxPacketLossPoor is the fractional MAX packet loss above which a
+	// stream is considered Poor. Not in the PS reference — our extension to
+	// catch burst-loss spikes that hide behind low averages. A peak where
+	// 30% of packets are lost is audibly disruptive even if the average is
+	// under 5%.
+	MaxPacketLossPoor = 0.30
+	// MaxPacketLossBad is the fractional MAX packet loss above which a
+	// stream is considered Bad. A 60%+ burst is a near-total outage for
+	// that interval — video freezes, audio cuts out.
+	MaxPacketLossBad = 0.60
+
 	// JitterPoorMs is the average jitter in milliseconds above which a stream
 	// is considered Poor. PS line 24: JitterPoorMs = 30.
 	JitterPoorMs = 30.0

@@ -138,7 +138,7 @@ func EvaluateStream(stream *graph.MediaStream, isVideo bool) StreamEvaluation {
 	// --- Threshold evaluation (same order as PS 171-190). ----------------
 	eval.Verdict = VerdictGood
 
-	// Packet loss (fractional).
+	// Packet loss — average (fractional).
 	if eval.Metrics.AvgLossPct != nil {
 		loss := *eval.Metrics.AvgLossPct
 		switch {
@@ -147,6 +147,19 @@ func EvaluateStream(stream *graph.MediaStream, isVideo bool) StreamEvaluation {
 			eval.Verdict = worseOf(eval.Verdict, VerdictBad)
 		case loss > PacketLossPoor:
 			eval.Reasons = append(eval.Reasons, "loss="+round1Pct(loss)+"%")
+			eval.Verdict = worseOf(eval.Verdict, VerdictPoor)
+		}
+	}
+
+	// Packet loss — max (burst detection, not in PS reference).
+	if eval.Metrics.MaxLossPct != nil {
+		maxLoss := *eval.Metrics.MaxLossPct
+		switch {
+		case maxLoss > MaxPacketLossBad:
+			eval.Reasons = append(eval.Reasons, "lossMax="+round1Pct(maxLoss)+"%")
+			eval.Verdict = worseOf(eval.Verdict, VerdictBad)
+		case maxLoss > MaxPacketLossPoor:
+			eval.Reasons = append(eval.Reasons, "lossMax="+round1Pct(maxLoss)+"%")
 			eval.Verdict = worseOf(eval.Verdict, VerdictPoor)
 		}
 	}

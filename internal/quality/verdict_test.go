@@ -86,6 +86,56 @@ func TestEvaluateStream_ReasonFormats(t *testing.T) {
 	}
 }
 
+func TestEvaluateStream_MaxLossThresholds(t *testing.T) {
+	t.Parallel()
+	frac := func(v float64) *float64 { return &v }
+
+	// lossMax 35% (> 30%) → Poor, even though avg loss is fine.
+	got := EvaluateStream(mediaStreamInit{
+		loss:    frac(0.01), // 1% avg — Good by itself
+		maxLoss: frac(0.35), // 35% peak — Poor
+	}.build(), false)
+	if got.Verdict != VerdictPoor {
+		t.Errorf("lossMax 35%%: verdict=%q want Poor", got.Verdict)
+	}
+	hasLossMax := false
+	for _, r := range got.Reasons {
+		if r == "lossMax=35%" {
+			hasLossMax = true
+		}
+	}
+	if !hasLossMax {
+		t.Errorf("lossMax 35%%: reasons=%v should contain lossMax=35%%", got.Reasons)
+	}
+
+	// lossMax 65% (> 60%) → Bad.
+	got = EvaluateStream(mediaStreamInit{
+		loss:    frac(0.005), // 0.5% avg
+		maxLoss: frac(0.65),  // 65% peak — Bad
+	}.build(), false)
+	if got.Verdict != VerdictBad {
+		t.Errorf("lossMax 65%%: verdict=%q want Bad", got.Verdict)
+	}
+
+	// lossMax 25% (< 30%) → stays Good (below threshold).
+	got = EvaluateStream(mediaStreamInit{
+		loss:    frac(0.01),
+		maxLoss: frac(0.25),
+	}.build(), false)
+	if got.Verdict != VerdictGood {
+		t.Errorf("lossMax 25%%: verdict=%q want Good", got.Verdict)
+	}
+
+	// lossMax 97.6% with avg 0.6% — the real-world case that triggered this.
+	got = EvaluateStream(mediaStreamInit{
+		loss:    frac(0.006),
+		maxLoss: frac(0.976),
+	}.build(), false)
+	if got.Verdict != VerdictBad {
+		t.Errorf("lossMax 97.6%%: verdict=%q want Bad", got.Verdict)
+	}
+}
+
 func TestEvaluateStream_Combinations(t *testing.T) {
 	t.Parallel()
 	frac := func(v float64) *float64 { return &v }
