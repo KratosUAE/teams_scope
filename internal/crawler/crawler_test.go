@@ -459,6 +459,95 @@ func TestTick_SkipsFullyWrittenCall(t *testing.T) {
 	}
 }
 
+func TestNewAppliesSweepDefaults(t *testing.T) {
+	c := newWithDeps(Config{}, &fakeGraph{}, newFakeCalls(), newFakeStreams(), &fakeMeta{}, nil)
+	if c.cfg.SweepInterval != defaultSweepInterval {
+		t.Errorf("SweepInterval default: got %v, want %v", c.cfg.SweepInterval, defaultSweepInterval)
+	}
+	if c.cfg.SweepWindow != defaultSweepWindow {
+		t.Errorf("SweepWindow default: got %v, want %v", c.cfg.SweepWindow, defaultSweepWindow)
+	}
+}
+
+func TestNewPreservesExplicitSweepConfig(t *testing.T) {
+	cfg := Config{SweepInterval: 2 * time.Hour, SweepWindow: 6 * time.Hour}
+	c := newWithDeps(cfg, &fakeGraph{}, newFakeCalls(), newFakeStreams(), &fakeMeta{}, discardLog())
+	if c.cfg.SweepInterval != 2*time.Hour {
+		t.Errorf("SweepInterval: got %v, want 2h", c.cfg.SweepInterval)
+	}
+	if c.cfg.SweepWindow != 6*time.Hour {
+		t.Errorf("SweepWindow: got %v, want 6h", c.cfg.SweepWindow)
+	}
+}
+
+func TestNewDisablesSweepWithNegativeInterval(t *testing.T) {
+	cfg := Config{SweepInterval: -1}
+	c := newWithDeps(cfg, &fakeGraph{}, newFakeCalls(), newFakeStreams(), &fakeMeta{}, discardLog())
+	if c.cfg.SweepInterval != 0 {
+		t.Errorf("SweepInterval: got %v, want 0 (disabled)", c.cfg.SweepInterval)
+	}
+}
+
+func TestRunSweepFiresAndCatchesNewRecords(t *testing.T) {
+	// Simulate a groupCall that only appears in the sweep window (wider
+	// lookback), not in the live tick window.
+	swept := make(chan struct{}, 1)
+
+	gc := &fakeGraph{
+		listFn: func(_ context.Context, start, end time.Time) ([]graph.CallRecordRef, error) {
+			window := end.Sub(start)
+			// Only return the "late" groupCall when the window is wide (sweep).
+			if window > time.Hour {
+				select {
+				case swept <- struct{}{}:
+				default:
+				}
+				return []graph.CallRecordRef{{ID: "late-group-call"}}, nil
+			}
+			return nil, nil
+		},
+		getFn: func(_ context.Context, id string) (*graph.CallRecord, error) {
+			return &graph.CallRecord{ID: id}, nil
+		},
+	}
+	calls := newFakeCalls()
+	streams := newFakeStreams()
+	meta := &fakeMeta{}
+
+	c := newWithDeps(
+		Config{
+			Interval:      50 * time.Millisecond,
+			Window:        time.Minute, // live tick: short window
+			SweepInterval: 150 * time.Millisecond,
+			SweepWindow:   2 * time.Hour, // sweep: wide window
+		},
+		gc, calls, streams, meta, discardLog(),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+
+	// Wait for the sweep to fire (signal-based, not sleep-based).
+	select {
+	case <-swept:
+		// Good: sweep fired.
+	case <-time.After(5 * time.Second):
+		t.Fatal("sweep did not fire within 5s")
+	}
+
+	cancel()
+	<-done
+
+	// The late groupCall should have been picked up by the sweep.
+	calls.mu.Lock()
+	_, found := calls.docs["late-group-call"]
+	calls.mu.Unlock()
+	if !found {
+		t.Error("sweep should have caught the late-materialising groupCall")
+	}
+}
+
 func TestRunFirstTickFiresImmediatelyThenCancels(t *testing.T) {
 	ticked := make(chan struct{}, 1)
 	gc := &fakeGraph{

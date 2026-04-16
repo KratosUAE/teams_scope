@@ -24,6 +24,16 @@ const (
 	defaultInterval = 5 * time.Minute
 	defaultWindow   = 30 * time.Minute
 
+	// defaultSweepInterval is how often the periodic sweep fires. The sweep
+	// catches groupCall records that Graph's listing endpoint doesn't return
+	// promptly — they appear in the index with a lag of up to several hours.
+	defaultSweepInterval = 1 * time.Hour
+
+	// defaultSweepWindow is the lookback for each sweep tick. 4 hours is
+	// generous enough to catch even slow-materialising groupCall records
+	// while still being cheap (exists-check skips known calls).
+	defaultSweepWindow = 4 * time.Hour
+
 	// minBackfillDays is a guard against `--backfill 0` turning into a
 	// no-op with a confusing empty window.
 	minBackfillDays = 1
@@ -62,7 +72,7 @@ type metaRepo interface {
 }
 
 // Config carries the tunable knobs exposed on the `teams_con crawl`
-// subcommand. Both fields have sensible defaults applied by New.
+// subcommand. All fields have sensible defaults applied by New.
 type Config struct {
 	// Interval is the time between tick starts. Defaults to 5m.
 	Interval time.Duration
@@ -70,6 +80,15 @@ type Config struct {
 	// overlap between Window and Interval is what lets the crawler catch
 	// records that Graph materialises with delay.
 	Window time.Duration
+
+	// SweepInterval is how often the periodic sweep fires. Defaults to 1h.
+	// The sweep re-queries Graph with a larger window to catch groupCall
+	// records whose listing materialisation lags behind the live tick
+	// window. Set to 0 to disable the sweep.
+	SweepInterval time.Duration
+	// SweepWindow is the lookback for each sweep tick. Defaults to 4h.
+	SweepWindow time.Duration
+
 	// IncludeVideo forwards to quality.ToCallRow / ToStreamRows. The MVP
 	// wants audio-only parity with the PowerShell reference and leaves this
 	// false.
@@ -111,6 +130,18 @@ func newWithDeps(
 	if cfg.Window <= 0 {
 		cfg.Window = defaultWindow
 	}
+	if cfg.SweepInterval < 0 {
+		// Negative means "explicitly disabled" — skip default application.
+		cfg.SweepInterval = 0
+	} else {
+		// Zero means "use defaults". A positive value is kept as-is.
+		if cfg.SweepInterval == 0 {
+			cfg.SweepInterval = defaultSweepInterval
+		}
+		if cfg.SweepWindow <= 0 {
+			cfg.SweepWindow = defaultSweepWindow
+		}
+	}
 	if log == nil {
 		log = slog.Default()
 	}
@@ -128,10 +159,16 @@ func newWithDeps(
 // first tick fires immediately so a freshly-started container produces data
 // without waiting the full interval. Per-tick errors are logged but never
 // abort the loop — the only way Run returns is via ctx cancellation.
+//
+// When SweepInterval > 0, a second ticker fires at that cadence with a
+// larger window (SweepWindow). This catches groupCall records whose Graph
+// listing materialisation lags behind the live tick window by hours.
 func (c *Crawler) Run(ctx context.Context) error {
 	c.log.InfoContext(ctx, "crawler run start",
 		slog.Duration("interval", c.cfg.Interval),
 		slog.Duration("window", c.cfg.Window),
+		slog.Duration("sweepInterval", c.cfg.SweepInterval),
+		slog.Duration("sweepWindow", c.cfg.SweepWindow),
 	)
 
 	// First tick fires immediately so the service is productive from t=0.
@@ -142,6 +179,18 @@ func (c *Crawler) Run(ctx context.Context) error {
 	ticker := time.NewTicker(c.cfg.Interval)
 	defer ticker.Stop()
 
+	// sweepC is nil when the sweep is disabled, so the select case
+	// never fires. When enabled we let the first sweep fire after the
+	// full SweepInterval elapses — the initial tick already covered the
+	// recent window.
+	var sweepC <-chan time.Time
+	var sweepTicker *time.Ticker
+	if c.cfg.SweepInterval > 0 {
+		sweepTicker = time.NewTicker(c.cfg.SweepInterval)
+		sweepC = sweepTicker.C
+		defer sweepTicker.Stop()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -150,6 +199,10 @@ func (c *Crawler) Run(ctx context.Context) error {
 		case <-ticker.C:
 			if err := c.runOneTick(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				c.log.ErrorContext(ctx, "crawler tick failed", slog.Any("err", err))
+			}
+		case <-sweepC:
+			if err := c.runOneSweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				c.log.ErrorContext(ctx, "crawler sweep failed", slog.Any("err", err))
 			}
 		}
 	}
@@ -160,6 +213,19 @@ func (c *Crawler) Run(ctx context.Context) error {
 func (c *Crawler) runOneTick(ctx context.Context) error {
 	now := time.Now().UTC()
 	start := now.Add(-c.cfg.Window)
+	return c.tick(ctx, start, now)
+}
+
+// runOneSweep is the periodic catch-up for slow-materialising records
+// (typically groupCall). It uses the same tick() code path but with the
+// wider SweepWindow, so exists-check skips records the live ticks already
+// persisted. The sweep reuses the same meta.SetLastCrawl path — there is
+// no separate "last sweep" timestamp because the sweep is just a
+// larger-window tick. tick() logs its own "tick start" with start/end times
+// so we don't duplicate the log here.
+func (c *Crawler) runOneSweep(ctx context.Context) error {
+	now := time.Now().UTC()
+	start := now.Add(-c.cfg.SweepWindow)
 	return c.tick(ctx, start, now)
 }
 
