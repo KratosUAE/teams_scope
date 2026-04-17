@@ -286,9 +286,10 @@ func (s *Server) handleGetCall(ctx context.Context, req mcpsdk.CallToolRequest) 
 		Call:    detail.Call,
 		Streams: filtered,
 	}
+	geoMap := s.resolveRelayGeo(ctx, filtered)
 	slim := slimCall{
 		Call:    detail.Call,
-		Streams: toSlimStreams(filtered),
+		Streams: toSlimStreams(filtered, geoMap),
 	}
 
 	header := fmt.Sprintf("showing %d/%d streams (%d Good hidden, %d truncated)\n",
@@ -453,6 +454,26 @@ func (s *Server) handleFindBadNetworkHotspots(ctx context.Context, req mcpsdk.Ca
 		return s.mapServiceErr(err), nil
 	}
 	return textAndJSON(summarizeHotspots(out), out), nil
+}
+
+// resolveRelayGeo collects relay IPs from stream rows and resolves them
+// to "City, CC" strings via the geo.Resolver. Returns nil when the
+// resolver is not configured (s.geo == nil) so callers can pass the map
+// straight to toSlimStreams without nil-checking.
+func (s *Server) resolveRelayGeo(ctx context.Context, rows []store.StreamRow) map[string]string {
+	if s.geo == nil {
+		return nil
+	}
+	ips := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if r.RelayIp != "" {
+			ips = append(ips, r.RelayIp)
+		}
+	}
+	if len(ips) == 0 {
+		return nil
+	}
+	return s.geo.ResolveMany(ctx, ips)
 }
 
 func (s *Server) handleFindCascades(ctx context.Context, req mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {

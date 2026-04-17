@@ -13,6 +13,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"teams_con/internal/api"
+	"teams_con/internal/geo"
 	"teams_con/internal/version"
 )
 
@@ -21,6 +22,7 @@ import (
 // drive the lifecycle.
 type Server struct {
 	svc *api.Service
+	geo *geo.Resolver
 	log *slog.Logger
 	m   *server.MCPServer
 }
@@ -28,7 +30,7 @@ type Server struct {
 // NewServer builds an MCP server with all tools registered and ready to
 // serve. The logger must be stderr-only — stdout is reserved for the
 // JSON-RPC protocol and any leakage breaks the transport.
-func NewServer(svc *api.Service, log *slog.Logger) *Server {
+func NewServer(svc *api.Service, geoResolver *geo.Resolver, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -36,7 +38,7 @@ func NewServer(svc *api.Service, log *slog.Logger) *Server {
 		server.WithToolCapabilities(false),
 		server.WithLogging(),
 	)
-	s := &Server{svc: svc, log: log, m: m}
+	s := &Server{svc: svc, geo: geoResolver, log: log, m: m}
 	s.registerTools()
 	return s
 }

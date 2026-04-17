@@ -224,7 +224,7 @@ func newTestServerFull(
 		pinger = &fakePinger{}
 	}
 	svc := api.NewServiceFromReaders(calls, streams, users, meta, subnets, userCards, dailySummary, pinger, silentLog())
-	return mcpsrv.NewServer(svc, silentLog())
+	return mcpsrv.NewServer(svc, nil, silentLog())
 }
 
 // fakeUserCards is the in-memory userCardsStore for mcp_test. Mirrors the

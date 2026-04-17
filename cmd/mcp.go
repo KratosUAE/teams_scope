@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"teams_con/internal/api"
+	"teams_con/internal/geo"
 	mcpsrv "teams_con/internal/mcp"
 	"teams_con/internal/store"
 )
@@ -68,7 +69,8 @@ func newMcpCmd() *cobra.Command {
 			}
 
 			svc := api.NewService(st, log)
-			srv := mcpsrv.NewServer(svc, log)
+			geoResolver := geo.New(st.RelayGeo, log)
+			srv := mcpsrv.NewServer(svc, geoResolver, log)
 
 			log.Info("mcp: serving over stdio")
 			return srv.Run(ctx)

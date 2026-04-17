@@ -46,6 +46,7 @@ type slimStream struct {
 	Subnet         string     `json:"subnet,omitempty"`
 	RelayIp        string     `json:"relayIp,omitempty"`
 	RelayPort      int        `json:"relayPort,omitempty"`
+	RelayGeo       string     `json:"relayGeo,omitempty"`
 	CaptureDevice  string     `json:"capture,omitempty"`
 	SegmentStart   *time.Time `json:"from,omitempty"`
 	SegmentEnd     *time.Time `json:"to,omitempty"`
@@ -58,11 +59,13 @@ type slimCall struct {
 	Streams []slimStream `json:"streams"`
 }
 
-// toSlimStreams compacts a slice of store.StreamRow values.
-func toSlimStreams(rows []store.StreamRow) []slimStream {
+// toSlimStreams compacts a slice of store.StreamRow values. geoMap is an
+// optional relay-IP→"City, CC" mapping produced by resolveRelayGeo; pass
+// nil when geo resolution is not needed (e.g. summarize_call).
+func toSlimStreams(rows []store.StreamRow, geoMap map[string]string) []slimStream {
 	out := make([]slimStream, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, slimStream{
+		s := slimStream{
 			User:           r.User,
 			Direction:      r.Direction,
 			Verdict:        r.Verdict,
@@ -84,7 +87,11 @@ func toSlimStreams(rows []store.StreamRow) []slimStream {
 			CaptureDevice:  r.CaptureDevice,
 			SegmentStart:   nilIfZero(r.SegmentStart),
 			SegmentEnd:     nilIfZero(r.SegmentEnd),
-		})
+		}
+		if geoMap != nil && r.RelayIp != "" {
+			s.RelayGeo = geoMap[r.RelayIp]
+		}
+		out = append(out, s)
 	}
 	return out
 }
