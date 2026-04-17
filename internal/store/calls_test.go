@@ -110,17 +110,48 @@ func TestBuildCallFilter_FromOnly(t *testing.T) {
 	}
 }
 
+func TestBuildCallFilter_MinParticipants(t *testing.T) {
+	f := buildCallFilter(CallListParams{MinParticipants: 3})
+	if len(f) != 1 {
+		t.Fatalf("want 1 clause, got %d (%+v)", len(f), f)
+	}
+	if f[0].Key != "participantCount" {
+		t.Errorf("want participantCount key, got %q", f[0].Key)
+	}
+	inner, ok := f[0].Value.(bson.D)
+	if !ok {
+		t.Fatalf("want bson.D value, got %T", f[0].Value)
+	}
+	if len(inner) != 1 || inner[0].Key != "$gte" || inner[0].Value != 3 {
+		t.Errorf("unexpected inner clause: %+v", inner)
+	}
+}
+
+func TestBuildCallFilter_MinParticipantsZeroSkipped(t *testing.T) {
+	f := buildCallFilter(CallListParams{MinParticipants: 0})
+	if len(f) != 0 {
+		t.Errorf("zero MinParticipants should be skipped, got %+v", f)
+	}
+}
+
+func TestBuildCallFilter_MinParticipantsNegativeSkipped(t *testing.T) {
+	f := buildCallFilter(CallListParams{MinParticipants: -1})
+	if len(f) != 0 {
+		t.Errorf("negative MinParticipants should be skipped, got %+v", f)
+	}
+}
+
 func TestBuildCallFilter_AllFields(t *testing.T) {
 	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	to := time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC)
 	v := "Poor"
 	upn := "bob@corp.com"
-	f := buildCallFilter(CallListParams{From: &from, To: &to, Verdict: &v, Upn: &upn})
-	if len(f) != 3 {
-		t.Fatalf("want 3 clauses, got %d (%+v)", len(f), f)
+	f := buildCallFilter(CallListParams{From: &from, To: &to, Verdict: &v, Upn: &upn, MinParticipants: 5})
+	if len(f) != 4 {
+		t.Fatalf("want 4 clauses, got %d (%+v)", len(f), f)
 	}
-	keys := []string{f[0].Key, f[1].Key, f[2].Key}
-	want := []string{"startTimeUtc", "verdict", "participants"}
+	keys := []string{f[0].Key, f[1].Key, f[2].Key, f[3].Key}
+	want := []string{"startTimeUtc", "verdict", "participants", "participantCount"}
 	for i := range want {
 		if keys[i] != want[i] {
 			t.Errorf("key[%d] = %q, want %q", i, keys[i], want[i])

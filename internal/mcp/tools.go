@@ -49,6 +49,7 @@ func (s *Server) registerTools() {
 				mcpsdk.Enum("Good", "Poor", "Bad"),
 			),
 			mcpsdk.WithString("upn", mcpsdk.Description("Filter to calls where this user participated, optional")),
+			mcpsdk.WithNumber("min_participants", mcpsdk.Description("Only return calls with at least this many participants (default 0 = disabled)")),
 			mcpsdk.WithNumber("limit", mcpsdk.Description("Default 20, max 500")),
 			mcpsdk.WithNumber("offset", mcpsdk.Description("Default 0")),
 		),
@@ -192,12 +193,13 @@ func (s *Server) handleListCalls(ctx context.Context, req mcpsdk.CallToolRequest
 	}
 
 	p := api.ListCallsParams{
-		From:    from,
-		To:      to,
-		Verdict: req.GetString("verdict", ""),
-		Upn:     req.GetString("upn", ""),
-		Limit:   req.GetInt("limit", defaultCallListLimit),
-		Offset:  req.GetInt("offset", 0),
+		From:            from,
+		To:              to,
+		Verdict:         req.GetString("verdict", ""),
+		Upn:             req.GetString("upn", ""),
+		MinParticipants: req.GetInt("min_participants", 0),
+		Limit:           req.GetInt("limit", defaultCallListLimit),
+		Offset:          req.GetInt("offset", 0),
 	}
 	if p.Limit > maxCallListLimit {
 		p.Limit = maxCallListLimit

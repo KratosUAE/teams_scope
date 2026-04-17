@@ -192,12 +192,13 @@ func newServiceFromDeps(
 // ListCallsParams is the HTTP-free input struct for ListCalls. All fields
 // are optional; zero/empty values are treated as "no filter".
 type ListCallsParams struct {
-	From    *time.Time
-	To      *time.Time
-	Verdict string // "" | Good | Poor | Bad
-	Upn     string
-	Limit   int
-	Offset  int
+	From            *time.Time
+	To              *time.Time
+	Verdict         string // "" | Good | Poor | Bad
+	Upn             string
+	MinParticipants int // 0 = disabled
+	Limit           int
+	Offset          int
 }
 
 // CallDetail is the GetCall result — a call plus its stream rows.
@@ -258,10 +259,11 @@ func (s *Service) ListCalls(ctx context.Context, p ListCallsParams) ([]store.Cal
 	limit := clampListLimit(p.Limit)
 
 	storeParams := store.CallListParams{
-		From:   p.From,
-		To:     p.To,
-		Limit:  limit,
-		Offset: p.Offset,
+		From:            p.From,
+		To:              p.To,
+		MinParticipants: p.MinParticipants,
+		Limit:           limit,
+		Offset:          p.Offset,
 	}
 	if p.Verdict != "" {
 		v := p.Verdict

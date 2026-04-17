@@ -33,12 +33,13 @@ type CallsRepo struct {
 // [minCallListLimit, maxCallListLimit] with a default of defaultCallListLimit
 // when <= 0.
 type CallListParams struct {
-	From    *time.Time
-	To      *time.Time
-	Verdict *string
-	Upn     *string
-	Limit   int
-	Offset  int
+	From            *time.Time
+	To              *time.Time
+	Verdict         *string
+	Upn             *string
+	MinParticipants int // 0 = disabled
+	Limit           int
+	Offset          int
 }
 
 // Upsert writes c to the calls collection, creating the document if absent
@@ -137,6 +138,9 @@ func buildCallFilter(p CallListParams) bson.D {
 	}
 	if p.Upn != nil && *p.Upn != "" {
 		filter = append(filter, bson.E{Key: "participants", Value: *p.Upn})
+	}
+	if p.MinParticipants > 0 {
+		filter = append(filter, bson.E{Key: "participantCount", Value: bson.D{{Key: "$gte", Value: p.MinParticipants}}})
 	}
 	return filter
 }
