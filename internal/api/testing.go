@@ -17,8 +17,9 @@ func NewServiceFromReaders(
 	meta metaReader,
 	subnets subnetsStore,
 	userCards userCardsStore,
+	dailySummary dailySummaryReader,
 	pinger mongoPinger,
 	log *slog.Logger,
 ) *Service {
-	return newServiceFromDeps(calls, streams, users, meta, subnets, userCards, pinger, log)
+	return newServiceFromDeps(calls, streams, users, meta, subnets, userCards, dailySummary, pinger, log)
 }

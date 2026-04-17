@@ -112,6 +112,11 @@ type userCardsStore interface {
 	List(ctx context.Context) ([]store.UserCard, error)
 }
 
+// dailySummaryReader is the minimal surface for per-day quality aggregation.
+type dailySummaryReader interface {
+	Summary(ctx context.Context, from, to time.Time) ([]store.DaySummary, error)
+}
+
 // mongoPinger abstracts the liveness probe used by Health. *store.Client
 // satisfies this via its Ping method; tests inject a stub closure.
 type mongoPinger interface {
@@ -122,14 +127,15 @@ type mongoPinger interface {
 // return Go types + sentinel errors so they can be reused unchanged by a
 // future MCP wrapper.
 type Service struct {
-	calls     callsReader
-	streams   streamsReader
-	users     usersReader
-	meta      metaReader
-	subnets   subnetsStore
-	userCards userCardsStore
-	pinger    mongoPinger
-	log       *slog.Logger
+	calls        callsReader
+	streams      streamsReader
+	users        usersReader
+	meta         metaReader
+	subnets      subnetsStore
+	userCards    userCardsStore
+	dailySummary dailySummaryReader
+	pinger       mongoPinger
+	log          *slog.Logger
 
 	// subnetResolver caches the parsed subnet table for longest-prefix
 	// lookups. It is constructed in NewService/newServiceFromDeps and is
@@ -146,14 +152,15 @@ func NewService(st *store.Client, log *slog.Logger) *Service {
 		log = slog.Default()
 	}
 	s := &Service{
-		calls:     st.Calls,
-		streams:   st.Streams,
-		users:     st.Users,
-		meta:      st.Meta,
-		subnets:   st.Subnets,
-		userCards: st.UserCards,
-		pinger:    st,
-		log:       log,
+		calls:        st.Calls,
+		streams:      st.Streams,
+		users:        st.Users,
+		meta:         st.Meta,
+		subnets:      st.Subnets,
+		userCards:    st.UserCards,
+		dailySummary: st.DailySummary,
+		pinger:       st,
+		log:          log,
 	}
 	s.subnetResolver = NewSubnetResolver(s.subnets, log)
 	return s
@@ -169,6 +176,7 @@ func newServiceFromDeps(
 	meta metaReader,
 	subnets subnetsStore,
 	userCards userCardsStore,
+	dailySummary dailySummaryReader,
 	pinger mongoPinger,
 	log *slog.Logger,
 ) *Service {
@@ -176,14 +184,15 @@ func newServiceFromDeps(
 		log = slog.Default()
 	}
 	s := &Service{
-		calls:     calls,
-		streams:   streams,
-		users:     users,
-		meta:      meta,
-		subnets:   subnets,
-		userCards: userCards,
-		pinger:    pinger,
-		log:       log,
+		calls:        calls,
+		streams:      streams,
+		users:        users,
+		meta:         meta,
+		subnets:      subnets,
+		userCards:    userCards,
+		dailySummary: dailySummary,
+		pinger:       pinger,
+		log:          log,
 	}
 	s.subnetResolver = NewSubnetResolver(s.subnets, log)
 	return s
@@ -357,4 +366,30 @@ func clampListLimit(n int) int {
 		return maxListLimit
 	}
 	return n
+}
+
+// maxDailySummaryWindow is the longest time window allowed for the daily
+// quality summary. Longer requests are silently clamped so a careless LLM
+// prompt cannot trigger a multi-month aggregation.
+const maxDailySummaryWindow = 30 * 24 * time.Hour
+
+// DailySummaryParams is the HTTP-free input for DailySummary. Both fields
+// are expected to be set by the caller (MCP handler defaults to last 7d).
+type DailySummaryParams struct {
+	From time.Time
+	To   time.Time
+}
+
+// DailySummary returns per-day quality aggregates for [From, To). The window
+// is clamped to maxDailySummaryWindow; if the caller asks for more, From is
+// silently moved forward.
+func (s *Service) DailySummary(ctx context.Context, p DailySummaryParams) ([]store.DaySummary, error) {
+	if p.To.Sub(p.From) > maxDailySummaryWindow {
+		p.From = p.To.Add(-maxDailySummaryWindow)
+	}
+	rows, err := s.dailySummary.Summary(ctx, p.From, p.To)
+	if err != nil {
+		return nil, fmt.Errorf("api: daily summary: %w", err)
+	}
+	return rows, nil
 }

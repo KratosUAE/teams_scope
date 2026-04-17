@@ -159,6 +159,17 @@ func (f *fakeSubnets) Delete(_ context.Context, cidr string) error {
 	return nil
 }
 
+// fakeDailySummary is the in-memory test double for the dailySummaryReader
+// interface consumed by Service.DailySummary.
+type fakeDailySummary struct {
+	rows []store.DaySummary
+	err  error
+}
+
+func (f *fakeDailySummary) Summary(_ context.Context, _, _ time.Time) ([]store.DaySummary, error) {
+	return f.rows, f.err
+}
+
 func silentLog() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -170,7 +181,7 @@ func newTestServer(
 	meta *fakeMeta,
 	pinger *fakePinger,
 ) *mcpsrv.Server {
-	return newTestServerFull(calls, streams, users, meta, nil, nil, pinger)
+	return newTestServerFull(calls, streams, users, meta, nil, nil, nil, pinger)
 }
 
 // newTestServerFull is the variant that lets a test inject its own
@@ -185,6 +196,7 @@ func newTestServerFull(
 	meta *fakeMeta,
 	subnets *fakeSubnets,
 	userCards *fakeUserCards,
+	dailySummary *fakeDailySummary,
 	pinger *fakePinger,
 ) *mcpsrv.Server {
 	if calls == nil {
@@ -205,10 +217,13 @@ func newTestServerFull(
 	if userCards == nil {
 		userCards = newFakeUserCards()
 	}
+	if dailySummary == nil {
+		dailySummary = &fakeDailySummary{}
+	}
 	if pinger == nil {
 		pinger = &fakePinger{}
 	}
-	svc := api.NewServiceFromReaders(calls, streams, users, meta, subnets, userCards, pinger, silentLog())
+	svc := api.NewServiceFromReaders(calls, streams, users, meta, subnets, userCards, dailySummary, pinger, silentLog())
 	return mcpsrv.NewServer(svc, silentLog())
 }
 
@@ -625,7 +640,7 @@ func TestListSubnets_Happy(t *testing.T) {
 		store.SubnetEntry{Cidr: "10.1.0.0/24", Name: "Office B", Office: "Dubai"},
 		store.SubnetEntry{Cidr: "192.168.0.0/24", Name: "Home", Office: "home"},
 	)
-	srv := newTestServerFull(nil, nil, nil, nil, subs, nil, nil)
+	srv := newTestServerFull(nil, nil, nil, nil, subs, nil, nil, nil)
 
 	blocks, isErr := callTool(t, srv, "list_subnets", map[string]any{})
 	if isErr {
@@ -647,7 +662,7 @@ func TestListSubnets_Happy(t *testing.T) {
 }
 
 func TestListSubnets_Empty(t *testing.T) {
-	srv := newTestServerFull(nil, nil, nil, nil, nil, nil, nil)
+	srv := newTestServerFull(nil, nil, nil, nil, nil, nil, nil, nil)
 	blocks, isErr := callTool(t, srv, "list_subnets", map[string]any{})
 	if isErr {
 		t.Fatalf("empty must not error: %v", blocks)
@@ -664,7 +679,7 @@ func TestGetUserCard_Present(t *testing.T) {
 		Tags:     []string{"vip", "mobile-heavy"},
 		Notes:    "escalated",
 	})
-	srv := newTestServerFull(nil, nil, nil, nil, nil, cards, nil)
+	srv := newTestServerFull(nil, nil, nil, nil, nil, cards, nil, nil)
 
 	blocks, isErr := callTool(t, srv, "get_user_card", map[string]any{"upn": "alice@corp.com"})
 	if isErr {
@@ -688,7 +703,7 @@ func TestGetUserCard_Present(t *testing.T) {
 }
 
 func TestGetUserCard_Absent(t *testing.T) {
-	srv := newTestServerFull(nil, nil, nil, nil, nil, nil, nil)
+	srv := newTestServerFull(nil, nil, nil, nil, nil, nil, nil, nil)
 
 	blocks, isErr := callTool(t, srv, "get_user_card", map[string]any{"upn": "ghost@corp.com"})
 	// Absent card is a successful result, not an error.
@@ -712,7 +727,7 @@ func TestGetUserCard_GetError(t *testing.T) {
 	t.Parallel()
 	cards := newFakeUserCards()
 	cards.getErr = errors.New("mongo boom")
-	srv := newTestServerFull(nil, nil, nil, nil, nil, cards, nil)
+	srv := newTestServerFull(nil, nil, nil, nil, nil, cards, nil, nil)
 
 	blocks, isErr := callTool(t, srv, "get_user_card", map[string]any{"upn": "alice@corp.com"})
 	if !isErr {

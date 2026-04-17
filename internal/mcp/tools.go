@@ -156,6 +156,15 @@ func (s *Server) registerTools() {
 		),
 		s.handleFindCascades,
 	)
+
+	s.m.AddTool(
+		mcpsdk.NewTool("daily_quality_summary",
+			mcpsdk.WithDescription("Per-day quality trend: call counts by verdict, lossMax distribution (streams >30%/>60%/>90%), peak lossMax. Default last 7 days, max 30 days."),
+			mcpsdk.WithString("from", mcpsdk.Description("RFC3339 lower bound, optional (default now-7d)")),
+			mcpsdk.WithString("to", mcpsdk.Description("RFC3339 upper bound, optional (default now)")),
+		),
+		s.handleDailySummary,
+	)
 }
 
 // parseTimeParam reads an optional RFC3339 timestamp from the tool

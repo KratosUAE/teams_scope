@@ -63,6 +63,7 @@ func TestServer_ListTools(t *testing.T) {
 		"list_subnets":             false,
 		"get_user_card":            false,
 		"find_bad_network_hotspots": false,
+		"daily_quality_summary":     false,
 	}
 	for _, tool := range env.Result.Tools {
 		if _, ok := want[tool.Name]; !ok {

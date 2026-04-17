@@ -244,6 +244,16 @@ func (f *fakeUserCards) Delete(_ context.Context, upn string) error {
 	return nil
 }
 
+// fakeDailySummary is the in-memory test double for dailySummaryReader.
+type fakeDailySummary struct {
+	rows []store.DaySummary
+	err  error
+}
+
+func (f *fakeDailySummary) Summary(_ context.Context, _, _ time.Time) ([]store.DaySummary, error) {
+	return f.rows, f.err
+}
+
 // newTestService assembles a Service with test doubles. Tests pass only the
 // fakes they care about; the rest get zero-value stubs so calls do not
 // panic when an unrelated method is invoked.
@@ -292,7 +302,7 @@ func newTestServiceFull(
 		pinger = &fakePinger{}
 	}
 	silent := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return newServiceFromDeps(calls, streams, users, meta, subnets, userCards, pinger, silent)
+	return newServiceFromDeps(calls, streams, users, meta, subnets, userCards, &fakeDailySummary{}, pinger, silent)
 }
 
 func TestListCalls_LimitClamping(t *testing.T) {
