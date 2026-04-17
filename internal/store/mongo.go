@@ -36,12 +36,13 @@ type Client struct {
 	db     *mongo.Database
 	log    *slog.Logger
 
-	Calls     *CallsRepo
-	Streams   *StreamsRepo
-	Meta      *MetaRepo
-	Users     *UsersRepo
-	Subnets   *SubnetsRepo
-	UserCards *UserCardsRepo
+	Calls        *CallsRepo
+	Streams      *StreamsRepo
+	Meta         *MetaRepo
+	Users        *UsersRepo
+	Subnets      *SubnetsRepo
+	UserCards    *UserCardsRepo
+	DailySummary *DailySummaryRepo
 }
 
 // New connects to MongoDB at uri, pings the primary, and returns a ready
@@ -82,12 +83,13 @@ func New(ctx context.Context, uri, dbName string, log *slog.Logger) (*Client, er
 		client:    mc,
 		db:        db,
 		log:       log,
-		Calls:     &CallsRepo{coll: db.Collection("calls"), log: log},
-		Streams:   &StreamsRepo{coll: db.Collection("streams"), log: log},
-		Meta:      &MetaRepo{coll: db.Collection("meta"), log: log},
-		Users:     &UsersRepo{calls: db.Collection("calls"), log: log},
-		Subnets:   &SubnetsRepo{coll: db.Collection("subnets"), log: log},
-		UserCards: &UserCardsRepo{coll: db.Collection("usercards"), log: log},
+		Calls:        &CallsRepo{coll: db.Collection("calls"), log: log},
+		Streams:      &StreamsRepo{coll: db.Collection("streams"), log: log},
+		Meta:         &MetaRepo{coll: db.Collection("meta"), log: log},
+		Users:        &UsersRepo{calls: db.Collection("calls"), log: log},
+		Subnets:      &SubnetsRepo{coll: db.Collection("subnets"), log: log},
+		UserCards:    &UserCardsRepo{coll: db.Collection("usercards"), log: log},
+		DailySummary: newDailySummaryRepo(db),
 	}
 
 	log.Info("store: connected", slog.String("database", dbName))
