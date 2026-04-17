@@ -83,7 +83,7 @@ type CrawlerMeta struct {
 	ID             string    `bson:"_id"                      json:"-"`
 	LastCrawlAt    time.Time `bson:"lastCrawlAt"              json:"lastCrawlAt"`
 	LastCrawlError string    `bson:"lastCrawlError,omitempty" json:"lastCrawlError,omitempty"`
-	LastBackfillAt time.Time `bson:"lastBackfillAt,omitempty" json:"lastBackfillAt,omitempty"`
+	LastBackfillAt time.Time `bson:"lastBackfillAt,omitzero" json:"lastBackfillAt,omitempty"`
 }
 
 // SubnetEntry is one document in the `subnets` collection — a CIDR-keyed
@@ -114,6 +114,16 @@ type UserCard struct {
 	Tags        []string  `bson:"tags,omitempty"         json:"tags,omitempty"`
 	Notes       string    `bson:"notes,omitempty"        json:"notes,omitempty"`
 	UpdatedAt   time.Time `bson:"updatedAt"              json:"updatedAt"`
+}
+
+// RelayGeo caches the geolocation of a Microsoft Transport Relay IP.
+// Keyed by IP string. Resolved via ipinfo.io, cached indefinitely
+// (relay IPs are static datacenter addresses).
+type RelayGeo struct {
+	IP         string    `bson:"_id"         json:"ip"`
+	City       string    `bson:"city"        json:"city"`
+	Country    string    `bson:"country"     json:"country"`
+	ResolvedAt time.Time `bson:"resolvedAt"  json:"resolvedAt"`
 }
 
 // UserStat is the result of the per-user aggregation over the calls

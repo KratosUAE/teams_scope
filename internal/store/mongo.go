@@ -43,6 +43,7 @@ type Client struct {
 	Subnets      *SubnetsRepo
 	UserCards    *UserCardsRepo
 	DailySummary *DailySummaryRepo
+	RelayGeo     *RelayGeoRepo
 }
 
 // New connects to MongoDB at uri, pings the primary, and returns a ready
@@ -90,6 +91,7 @@ func New(ctx context.Context, uri, dbName string, log *slog.Logger) (*Client, er
 		Subnets:      &SubnetsRepo{coll: db.Collection("subnets"), log: log},
 		UserCards:    &UserCardsRepo{coll: db.Collection("usercards"), log: log},
 		DailySummary: newDailySummaryRepo(db),
+		RelayGeo:     newRelayGeoRepo(db),
 	}
 
 	log.Info("store: connected", slog.String("database", dbName))
