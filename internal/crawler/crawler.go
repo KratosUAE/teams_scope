@@ -54,14 +54,20 @@ type graphClient interface {
 }
 
 // callsRepo is the subset of *store.CallsRepo used by the crawler.
+//
+// GetState replaces the older Exists+streams.HasStreams pair: it returns
+// (exists, streamsProjected) in a single round-trip so the tick can decide
+// skip-vs-heal without consulting the streams collection. MarkStreamsProjected
+// is set to true after a successful ReplaceByCall, including the legitimate
+// empty-projection case (audio-only filter, no media, etc.).
 type callsRepo interface {
-	Exists(ctx context.Context, id string) (bool, error)
+	GetState(ctx context.Context, id string) (exists bool, streamsProjected bool, err error)
 	Upsert(ctx context.Context, c store.Call) error
+	MarkStreamsProjected(ctx context.Context, id string) error
 }
 
 // streamsRepo is the subset of *store.StreamsRepo used by the crawler.
 type streamsRepo interface {
-	HasStreams(ctx context.Context, id string) (bool, error)
 	ReplaceByCall(ctx context.Context, callID string, rows []store.StreamRow) error
 }
 
@@ -336,39 +342,28 @@ func (c *Crawler) processRef(
 	log *slog.Logger,
 	skipped, inserted, errs *int,
 ) bool {
-	// Layer 1: cheap existence check skips the expensive detail call.
-	exists, err := c.calls.Exists(ctx, ref.ID)
+	// One projection-only round-trip tells us both whether the call exists
+	// and whether the previous tick finished writing its streams.
+	exists, streamsProjected, err := c.calls.GetState(ctx, ref.ID)
 	if err != nil {
 		*errs++
-		log.WarnContext(ctx, "exists check failed",
+		log.WarnContext(ctx, "get call state failed",
 			slog.String("callId", ref.ID),
 			slog.Any("err", err),
 		)
 		return true
 	}
 	if exists {
-		// Layer 2: guard against partial-write gap — a previous tick may have
-		// upserted the call document but then crashed before writing streams.
-		// If streams are already present we can skip normally; if they are
-		// missing we fall through and re-run the full upsert (idempotent for
-		// immutable Graph records, so the extra work is cheap).
-		hasStreams, streamErr := c.streams.HasStreams(ctx, ref.ID)
-		if streamErr != nil {
-			// Can't determine stream state; skip conservatively.
-			*errs++
-			log.WarnContext(ctx, "has-streams check failed",
-				slog.String("callId", ref.ID),
-				slog.Any("err", streamErr),
-			)
-			return true
-		}
-		if hasStreams {
+		if streamsProjected {
 			*skipped++
 			return true
 		}
-		// streams are missing despite the call existing — fall through to
-		// re-fetch and re-persist, healing the partial write.
-		log.DebugContext(ctx, "healing partial write: call exists but streams missing",
+		// streamsProjected==false means either the previous tick crashed
+		// after Upsert but before ReplaceByCall, or this is a legacy doc
+		// from before the flag existed. Either way, fall through to the
+		// full upsert path; MarkStreamsProjected at the end will mark the
+		// doc as healed and prevent the same call from looping forever.
+		log.DebugContext(ctx, "healing: call exists but streams not yet projected",
 			slog.String("callId", ref.ID),
 		)
 	}
@@ -409,6 +404,19 @@ func (c *Crawler) processRef(
 	if err := c.streams.ReplaceByCall(ctx, ref.ID, storeStreams); err != nil {
 		*errs++
 		log.WarnContext(ctx, "streams replace failed",
+			slog.String("callId", ref.ID),
+			slog.Any("err", err),
+		)
+		return true
+	}
+
+	// Mark the doc as fully processed so the next tick's GetState returns
+	// (true, true) and the call is skipped — including the legitimate case
+	// where the projection produced zero stream rows. Without this flag the
+	// call would loop through the heal branch on every single tick.
+	if err := c.calls.MarkStreamsProjected(ctx, ref.ID); err != nil {
+		*errs++
+		log.WarnContext(ctx, "mark streams projected failed",
 			slog.String("callId", ref.ID),
 			slog.Any("err", err),
 		)

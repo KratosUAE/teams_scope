@@ -45,23 +45,31 @@ func (f *fakeGraph) GetCallRecord(ctx context.Context, id string) (*graph.CallRe
 	return &graph.CallRecord{ID: id}, nil
 }
 
-// fakeCalls is a tiny in-memory callsRepo.
+// fakeCalls is a tiny in-memory callsRepo. The StreamsProjected flag on
+// each stored Call mirrors what GetState would return for the production
+// repo, so seeding it lets tests model "fully written" vs "partial write"
+// without touching the streams collection.
 type fakeCalls struct {
-	mu       sync.Mutex
-	docs     map[string]store.Call
-	existErr error
+	mu          sync.Mutex
+	docs        map[string]store.Call
+	existErr    error
+	markedN     int // counts MarkStreamsProjected invocations
+	markedIDs   []string
 }
 
 func newFakeCalls() *fakeCalls { return &fakeCalls{docs: make(map[string]store.Call)} }
 
-func (f *fakeCalls) Exists(_ context.Context, id string) (bool, error) {
+func (f *fakeCalls) GetState(_ context.Context, id string) (bool, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.existErr != nil {
-		return false, f.existErr
+		return false, false, f.existErr
 	}
-	_, ok := f.docs[id]
-	return ok, nil
+	c, ok := f.docs[id]
+	if !ok {
+		return false, false, nil
+	}
+	return true, c.StreamsProjected, nil
 }
 
 func (f *fakeCalls) Upsert(_ context.Context, c store.Call) error {
@@ -71,21 +79,26 @@ func (f *fakeCalls) Upsert(_ context.Context, c store.Call) error {
 	return nil
 }
 
+func (f *fakeCalls) MarkStreamsProjected(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.markedN++
+	f.markedIDs = append(f.markedIDs, id)
+	if c, ok := f.docs[id]; ok {
+		c.StreamsProjected = true
+		f.docs[id] = c
+	}
+	return nil
+}
+
 // fakeStreams is a tiny in-memory streamsRepo.
 type fakeStreams struct {
-	mu          sync.Mutex
-	byCall      map[string][]store.StreamRow
-	replaceN    int // counts ReplaceByCall invocations
+	mu       sync.Mutex
+	byCall   map[string][]store.StreamRow
+	replaceN int // counts ReplaceByCall invocations
 }
 
 func newFakeStreams() *fakeStreams { return &fakeStreams{byCall: make(map[string][]store.StreamRow)} }
-
-func (f *fakeStreams) HasStreams(_ context.Context, callID string) (bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	rows, ok := f.byCall[callID]
-	return ok && len(rows) > 0, nil
-}
 
 func (f *fakeStreams) ReplaceByCall(_ context.Context, callID string, rows []store.StreamRow) error {
 	f.mu.Lock()
@@ -189,11 +202,10 @@ func TestTickSkipsExistingCalls(t *testing.T) {
 		},
 	}
 	calls := newFakeCalls()
-	calls.docs[existing] = store.Call{CallId: existing}
+	// StreamsProjected=true marks the doc as fully written by a previous
+	// tick — GetState returns (true, true) and the skip path is exercised.
+	calls.docs[existing] = store.Call{CallId: existing, StreamsProjected: true}
 	streams := newFakeStreams()
-	// Pre-seed a stream row so HasStreams returns true and the skip path is
-	// exercised (fully-written record — both call and streams are present).
-	streams.byCall[existing] = []store.StreamRow{{CallId: existing}}
 	meta := &fakeMeta{}
 
 	c := newTestCrawler(gc, calls, streams, meta)
@@ -385,8 +397,9 @@ func TestBackfillClampsDays(t *testing.T) {
 }
 
 // TestTick_HealsPartialWrite verifies that when a call document is already
-// stored but its streams are missing (partial-write scenario), the crawler
-// falls through and re-runs GetCallRecord + ReplaceByCall to heal the gap.
+// stored but StreamsProjected is false (partial-write or pre-flag legacy
+// doc), the crawler falls through and re-runs GetCallRecord + ReplaceByCall
+// to heal the gap, then marks the doc as projected.
 func TestTick_HealsPartialWrite(t *testing.T) {
 	partialID := "call-partial"
 	gc := &fakeGraph{
@@ -398,12 +411,12 @@ func TestTick_HealsPartialWrite(t *testing.T) {
 		},
 	}
 	calls := newFakeCalls()
-	// Call document exists (was written in a previous tick).
+	// Call document exists but StreamsProjected=false — previous tick
+	// crashed between Upsert and ReplaceByCall, or the doc predates the
+	// flag. Either way, this tick must heal it.
 	calls.docs[partialID] = store.Call{CallId: partialID}
 
 	streams := newFakeStreams()
-	// Streams are NOT seeded — simulates the partial-write gap.
-
 	meta := &fakeMeta{}
 
 	c := newTestCrawler(gc, calls, streams, meta)
@@ -426,10 +439,25 @@ func TestTick_HealsPartialWrite(t *testing.T) {
 	if !replaced {
 		t.Error("ReplaceByCall should be invoked to write missing streams")
 	}
+
+	// MarkStreamsProjected must have been invoked exactly once so the next
+	// tick takes the skip branch instead of looping through the heal path.
+	calls.mu.Lock()
+	markedN := calls.markedN
+	projected := calls.docs[partialID].StreamsProjected
+	calls.mu.Unlock()
+	if markedN != 1 {
+		t.Errorf("MarkStreamsProjected calls: got %d, want 1", markedN)
+	}
+	if !projected {
+		t.Error("StreamsProjected should be true after heal")
+	}
 }
 
-// TestTick_SkipsFullyWrittenCall verifies that when both call and streams are
-// present, the crawler skips without calling GetCallRecord.
+// TestTick_SkipsFullyWrittenCall verifies that when StreamsProjected=true,
+// the crawler skips without calling GetCallRecord — even if the streams
+// collection is empty (which is now a legitimate end-state for calls whose
+// projection produced zero rows).
 func TestTick_SkipsFullyWrittenCall(t *testing.T) {
 	fullID := "call-complete"
 	gc := &fakeGraph{
@@ -438,12 +466,9 @@ func TestTick_SkipsFullyWrittenCall(t *testing.T) {
 		},
 	}
 	calls := newFakeCalls()
-	calls.docs[fullID] = store.Call{CallId: fullID}
+	calls.docs[fullID] = store.Call{CallId: fullID, StreamsProjected: true}
 
 	streams := newFakeStreams()
-	// Both call and streams are present — fully written record.
-	streams.byCall[fullID] = []store.StreamRow{{CallId: fullID}}
-
 	meta := &fakeMeta{}
 
 	c := newTestCrawler(gc, calls, streams, meta)
@@ -456,6 +481,63 @@ func TestTick_SkipsFullyWrittenCall(t *testing.T) {
 	gc.mu.Unlock()
 	if len(gotIDs) != 0 {
 		t.Errorf("GetCallRecord should NOT be called for fully-written record, got %v", gotIDs)
+	}
+}
+
+// TestTick_EmptyStreamProjectionStillMarksProjected pins the bug fix:
+// a call whose stream projection legitimately produces zero rows (e.g.
+// audio-only call when IncludeVideo is false, or a call with no media at
+// all) must still get StreamsProjected=true so subsequent ticks skip it
+// instead of re-fetching the same record forever.
+func TestTick_EmptyStreamProjectionStillMarksProjected(t *testing.T) {
+	id := "call-no-streams"
+	gc := &fakeGraph{
+		listFn: func(_ context.Context, _, _ time.Time) ([]graph.CallRecordRef, error) {
+			return []graph.CallRecordRef{{ID: id}}, nil
+		},
+		// Bare CallRecord — no Sessions/Segments/Media, so quality.ToStreamRows
+		// returns an empty slice, ReplaceByCall is a no-op insert, and the old
+		// HasStreams-based dedup would loop on this call every tick.
+		getFn: func(_ context.Context, recID string) (*graph.CallRecord, error) {
+			return &graph.CallRecord{ID: recID}, nil
+		},
+	}
+	calls := newFakeCalls()
+	streams := newFakeStreams()
+	meta := &fakeMeta{}
+
+	c := newTestCrawler(gc, calls, streams, meta)
+
+	// First tick: call is new, gets fully processed.
+	if err := c.tick(context.Background(), time.Now().Add(-time.Hour), time.Now()); err != nil {
+		t.Fatalf("tick #1 returned error: %v", err)
+	}
+
+	calls.mu.Lock()
+	doc, ok := calls.docs[id]
+	calls.mu.Unlock()
+	if !ok {
+		t.Fatal("call should have been upserted")
+	}
+	if !doc.StreamsProjected {
+		t.Error("StreamsProjected should be true even when projection is empty")
+	}
+
+	// Second tick: same call returned by Graph again. With the flag set,
+	// GetCallRecord must NOT be called — proving the loop is broken.
+	gc.mu.Lock()
+	gc.getIDs = nil
+	gc.mu.Unlock()
+
+	if err := c.tick(context.Background(), time.Now().Add(-time.Hour), time.Now()); err != nil {
+		t.Fatalf("tick #2 returned error: %v", err)
+	}
+
+	gc.mu.Lock()
+	gotIDs := gc.getIDs
+	gc.mu.Unlock()
+	if len(gotIDs) != 0 {
+		t.Errorf("tick #2 should skip the call without re-fetching, got GetCallRecord(%v)", gotIDs)
 	}
 }
 

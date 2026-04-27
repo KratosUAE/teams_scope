@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -71,6 +72,44 @@ func (r *CallsRepo) Exists(ctx context.Context, id string) (bool, error) {
 		return false, fmt.Errorf("store: exists call %s: %w", id, err)
 	}
 	return n > 0, nil
+}
+
+// GetState returns (exists, streamsProjected) for the given call id in a
+// single round-trip. The crawler uses it on every tick to decide whether a
+// call has been fully processed (skip) or only partially written (heal).
+// Projecting only the bare minimum keeps the hot path cheap; absent
+// documents are reported as (false, false, nil) without an error so the
+// caller can treat "not found" as a normal branch.
+func (r *CallsRepo) GetState(ctx context.Context, id string) (bool, bool, error) {
+	type stateProjection struct {
+		StreamsProjected bool `bson:"streamsProjected"`
+	}
+	var s stateProjection
+	filter := bson.D{{Key: "_id", Value: id}}
+	opts := options.FindOne().SetProjection(bson.D{
+		{Key: "streamsProjected", Value: 1},
+	})
+	err := r.coll.FindOne(ctx, filter, opts).Decode(&s)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return false, false, nil
+		}
+		return false, false, fmt.Errorf("store: get call state %s: %w", id, err)
+	}
+	return true, s.StreamsProjected, nil
+}
+
+// MarkStreamsProjected sets streamsProjected=true on the call document. The
+// crawler calls this after a successful ReplaceByCall — even when the
+// stream projection was empty — so the next tick's GetState returns
+// (true, true) and the heal branch is bypassed.
+func (r *CallsRepo) MarkStreamsProjected(ctx context.Context, id string) error {
+	filter := bson.D{{Key: "_id", Value: id}}
+	update := bson.D{{Key: "$set", Value: bson.D{{Key: "streamsProjected", Value: true}}}}
+	if _, err := r.coll.UpdateOne(ctx, filter, update); err != nil {
+		return fmt.Errorf("store: mark streams projected %s: %w", id, err)
+	}
+	return nil
 }
 
 // Get fetches a single call by id. Returns ErrNotFound (wrappable via

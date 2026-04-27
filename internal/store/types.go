@@ -31,6 +31,13 @@ type Call struct {
 	WorstPlatform       string    `bson:"worstPlatform"       json:"worstPlatform"`
 	WorstCaptureDevice  string    `bson:"worstCaptureDevice"  json:"worstCaptureDevice"`
 	FetchedAt           time.Time `bson:"fetchedAt"           json:"fetchedAt"`
+	// StreamsProjected marks the call as fully processed by the crawler:
+	// quality projection ran and ReplaceByCall succeeded (even when the
+	// projection produced zero stream rows — e.g. a call with only video
+	// media when IncludeVideo=false). Without this flag the crawler used
+	// streams.HasStreams as the dedup key, which re-fetched and re-upserted
+	// every stream-less call on every single tick forever.
+	StreamsProjected bool `bson:"streamsProjected,omitempty" json:"streamsProjected,omitempty"`
 }
 
 // StreamRow is the flat per-stream document stored in the `streams`
